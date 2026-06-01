@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>OduvanchikFit — Кабінет тренера</title>
 
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -222,7 +223,38 @@
 </head>
 <body class="bg-[#0D0D11] text-gray-100 font-sans antialiased overflow-hidden">
 
-<div id="app" class="flex h-screen">
+<div id="auth-screen" class="hidden fixed inset-0 z-[99999] bg-surf-950 flex items-center justify-center p-4">
+  <div class="w-full max-w-sm">
+    <div class="text-center mb-10">
+      <div class="inline-flex items-center justify-center w-16 h-16 rounded-3xl bg-gradient-to-br from-[#E5A93C] via-[#D4AF37] to-[#F7D77D] shadow-[0_18px_50px_rgba(212,175,55,.3)] mb-4">
+        <span class="text-2xl font-black text-slate-950">O</span>
+      </div>
+      <div class="text-xl font-bold uppercase tracking-[0.35em] text-white">ODUVANCHIK <span class="text-[#E5A93C]">FIT</span></div>
+      <div class="text-xs text-gray-500 mt-1">Кабінет тренера</div>
+    </div>
+    <form id="login-form" class="space-y-4">
+      <div>
+        <label class="ft-label">Email</label>
+        <input id="auth-email" type="email" class="ft-input" placeholder="your@email.com" required autocomplete="email">
+      </div>
+      <div>
+        <label class="ft-label">Пароль</label>
+        <input id="auth-password" type="password" class="ft-input" placeholder="••••••••" required autocomplete="current-password">
+      </div>
+      <div id="auth-error" class="text-red-400 text-sm min-h-[1.25rem]"></div>
+      <button type="submit" id="auth-submit" class="btn btn-gold w-full h-12 text-base font-semibold">Увійти</button>
+    </form>
+  </div>
+</div>
+
+<div id="app-loader" class="hidden fixed inset-0 z-[99998] bg-surf-950 flex flex-col items-center justify-center gap-4">
+  <div class="inline-flex items-center justify-center w-14 h-14 rounded-3xl bg-gradient-to-br from-[#E5A93C] via-[#D4AF37] to-[#F7D77D]">
+    <span class="text-xl font-black text-slate-950">O</span>
+  </div>
+  <div class="text-sm text-gray-400">Завантаження...</div>
+</div>
+
+<div id="app" class="flex h-screen hidden">
 
   <aside id="sidebar" class="hidden lg:flex flex-col w-64 flex-shrink-0 sidebar-bg border-r border-white/10">
     <div class="flex items-center gap-3 px-6 py-5 border-b border-white/10">
@@ -424,150 +456,189 @@ const DEFAULT_DATA = {
   },
 };
 
+// ─── SUPABASE CONFIG ─────────────────────────────────────────────────────────
+// Замінити YOUR_SUPABASE_URL та YOUR_SUPABASE_ANON_KEY після створення проекту
+const SUPA_URL  = 'YOUR_SUPABASE_URL';
+const SUPA_KEY  = 'YOUR_SUPABASE_ANON_KEY';
+const SUPA = supabase.createClient(SUPA_URL, SUPA_KEY);
+let _uid = null;
+// ─────────────────────────────────────────────────────────────────────────────
+
 const DB = {
   _d: null,
+  _realtimeCh: null,
 
-  load() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      this._d = raw ? JSON.parse(raw) : JSON.parse(JSON.stringify(DEFAULT_DATA));
-      if (!raw) {
-        const now = new Date();
-        const today = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
-        const tomorrow = new Date(now.getTime() + 86400000);
-        const tomorrowDate = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth()+1).padStart(2,'0')}-${String(tomorrow.getDate()).padStart(2,'0')}`;
-        if (!this._d.schedules || !this._d.schedules.length) {
-          this._d.schedules = [
-            {id:'sch1', clientId:'demo1', date:today, time:'09:00', endTime:'10:00', status:'scheduled'},
-            {id:'sch2', clientId:'demo2', date:today, time:'11:30', endTime:'12:30', status:'scheduled'},
-            {id:'sch3', clientId:'demo1', date:tomorrowDate, time:'18:00', endTime:'19:00', status:'scheduled'},
-          ];
-        }
-      }
-    } catch { this._d = JSON.parse(JSON.stringify(DEFAULT_DATA)); }
-    return this;
+  // Завантажує всі дані з Supabase у пам'ять
+  async _loadAll() {
+    const [c, s, f, n, p] = await Promise.all([
+      SUPA.from('clients').select('id,payload').eq('user_id', _uid),
+      SUPA.from('schedules').select('id,payload').eq('user_id', _uid),
+      SUPA.from('financial_transactions').select('id,payload').eq('user_id', _uid),
+      SUPA.from('quick_notes').select('id,payload').eq('user_id', _uid),
+      SUPA.from('partner_requests').select('id,payload').eq('user_id', _uid),
+    ]);
+    this._d = {
+      clients:               (c.data||[]).map(r=>r.payload),
+      schedules:             (s.data||[]).map(r=>r.payload),
+      financialTransactions: (f.data||[]).map(r=>r.payload),
+      quickNotes:            (n.data||[]).map(r=>r.payload),
+      partnerRequests:       (p.data||[]).map(r=>r.payload),
+      theme:    localStorage.getItem('fittrack_theme') || 'dark',
+      knowledge: DEFAULT_DATA.knowledge,
+    };
   },
 
-  save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(this._d)); return this; },
+  // Підписка на зміни з інших пристроїв — оновлює кеш і перемальовує поточний вигляд
+  _subscribeRealtime() {
+    if (this._realtimeCh) SUPA.removeChannel(this._realtimeCh);
+    const reload = async () => { await this._loadAll(); Router._go(); };
+    this._realtimeCh = SUPA.channel('fittrack-rt')
+      .on('postgres_changes',{event:'*',schema:'public',table:'clients'},            reload)
+      .on('postgres_changes',{event:'*',schema:'public',table:'schedules'},           reload)
+      .on('postgres_changes',{event:'*',schema:'public',table:'financial_transactions'}, reload)
+      .on('postgres_changes',{event:'*',schema:'public',table:'quick_notes'},         reload)
+      .on('postgres_changes',{event:'*',schema:'public',table:'partner_requests'},    reload)
+      .subscribe();
+  },
 
-  getTheme()  { return this._d.theme || 'dark'; },
-  setTheme(t) { this._d.theme = t; this.save(); },
+  async init(user) {
+    _uid = user.id;
+    await this._loadAll();
+    this._subscribeRealtime();
+  },
 
-  getClients()  { return this._d.clients || []; },
-  getClient(id) { return (this._d.clients || []).find(c => c.id === id) || null; },
+  // ── Всі GET — синхронні (читають з кешу) ───────────────────────────────────
+  getTheme()  { return this._d?.theme || 'dark'; },
+  setTheme(t) { this._d.theme = t; localStorage.setItem('fittrack_theme', t); },
+
+  getClients()  { return this._d?.clients || []; },
+  getClient(id) { return (this._d?.clients||[]).find(c=>c.id===id)||null; },
+
+  getSchedules()             { return this._d?.schedules||[]; },
+  getSchedule(id)            { return (this._d?.schedules||[]).find(e=>e.id===id)||null; },
+  getSchedulesForDay(date)   { return (this._d?.schedules||[]).filter(e=>e.date===date).sort((a,b)=>(a.time||'').localeCompare(b.time||'')); },
+  getFinancialTransactions() { return this._d?.financialTransactions||[]; },
+  getNotes()                 { return this._d?.quickNotes||[]; },
+  getPartnerRequests()       { return this._d?.partnerRequests||[]; },
+  getKnowledge()             { return this._d?.knowledge||DEFAULT_DATA.knowledge; },
+
+  // ── Запис — оновлює кеш + пише у Supabase асинхронно ──────────────────────
+  _up(table, id, payload) {
+    SUPA.from(table).upsert({id, user_id:_uid, payload, updated_at:new Date().toISOString()})
+      .then(({error})=>{ if(error) console.error(table, error); });
+  },
+  _del(table, id) {
+    SUPA.from(table).delete().eq('id',id).eq('user_id',_uid)
+      .then(({error})=>{ if(error) console.error(table,'del',error); });
+  },
 
   saveClient(c) {
-    if (!this._d.clients) this._d.clients = [];
-    const i = this._d.clients.findIndex(x => x.id === c.id);
-    if (i >= 0) this._d.clients[i] = c; else this._d.clients.unshift(c);
-    this.save();
+    if(!this._d.clients) this._d.clients=[];
+    const i=this._d.clients.findIndex(x=>x.id===c.id);
+    if(i>=0) this._d.clients[i]=c; else this._d.clients.unshift(c);
+    this._up('clients',c.id,c);
+  },
+  deleteClient(id) {
+    this._d.clients=(this._d.clients||[]).filter(c=>c.id!==id);
+    this._del('clients',id);
   },
 
-  deleteClient(id) { this._d.clients = (this._d.clients||[]).filter(c => c.id !== id); this.save(); },
-
-  addWeight(clientId, date, weight) {
-    const c = this.getClient(clientId); if (!c) return;
-    c.weightHistory = (c.weightHistory||[]).filter(e => e.date !== date);
-    c.weightHistory.push({date, weight});
-    c.weightHistory.sort((a,b) => a.date.localeCompare(b.date));
-    c.currentWeight = weight;
-    this.save();
-  },
-
-  deleteWeight(clientId, date) {
-    const c = this.getClient(clientId); if (!c) return;
-    c.weightHistory = (c.weightHistory||[]).filter(e => e.date !== date);
-    if (c.weightHistory.length) c.currentWeight = c.weightHistory[c.weightHistory.length-1].weight;
-    this.save();
-  },
-
-  getNotes()   { return this._d.quickNotes || []; },
-  saveNote(n)  {
-    if (!this._d.quickNotes) this._d.quickNotes = [];
-    const i = this._d.quickNotes.findIndex(x => x.id === n.id);
-    if (i >= 0) this._d.quickNotes[i] = n; else this._d.quickNotes.unshift(n);
-    this.save();
-  },
-  deleteNote(id) { this._d.quickNotes = (this._d.quickNotes||[]).filter(n => n.id !== id); this.save(); },
-
-  getSchedules() { return this._d.schedules || []; },
-  getFinancialTransactions() { return this._d.financialTransactions || []; },
-  saveFinancialTransaction(t) {
-    if (!this._d.financialTransactions) this._d.financialTransactions = [];
-    t.id = t.id || this.uid();
-    const idx = this._d.financialTransactions.findIndex(x=>x.id===t.id);
-    if (idx>=0) this._d.financialTransactions[idx] = t; else this._d.financialTransactions.unshift(t);
-    this.save();
-  },
-  addSessionsToClient(clientId, count) {
-    const c = this.getClient(clientId);
-    if (!c) return;
-    if (typeof c.remainingSessions !== 'number') c.remainingSessions = 0;
-    c.remainingSessions += Number(count) || 0;
+  addWeight(clientId,date,weight) {
+    const c=this.getClient(clientId); if(!c) return;
+    c.weightHistory=(c.weightHistory||[]).filter(e=>e.date!==date);
+    c.weightHistory.push({date,weight});
+    c.weightHistory.sort((a,b)=>a.date.localeCompare(b.date));
+    c.currentWeight=weight;
     this.saveClient(c);
   },
-  getPartnerRequests() { return this._d.partnerRequests || []; },
-  savePartnerRequest(r) {
-    if (!this._d.partnerRequests) this._d.partnerRequests = [];
-    r.id = r.id || this.uid();
-    const idx = this._d.partnerRequests.findIndex(x=>x.id===r.id);
-    if (idx>=0) this._d.partnerRequests[idx] = r; else this._d.partnerRequests.unshift(r);
-    this.save();
+  deleteWeight(clientId,date) {
+    const c=this.getClient(clientId); if(!c) return;
+    c.weightHistory=(c.weightHistory||[]).filter(e=>e.date!==date);
+    if(c.weightHistory.length) c.currentWeight=c.weightHistory[c.weightHistory.length-1].weight;
+    this.saveClient(c);
   },
-  deletePartnerRequest(id) { this._d.partnerRequests = (this._d.partnerRequests||[]).filter(r => r.id !== id); this.save(); },
-  getSchedule(id) { return (this._d.schedules || []).find(e => e.id === id) || null; },
-  getSchedulesForDay(date) { return (this._d.schedules || []).filter(e => e.date === date).sort((a,b)=> (a.time||'').localeCompare(b.time||'')); },
+
+  saveNote(n) {
+    if(!this._d.quickNotes) this._d.quickNotes=[];
+    const i=this._d.quickNotes.findIndex(x=>x.id===n.id);
+    if(i>=0) this._d.quickNotes[i]=n; else this._d.quickNotes.unshift(n);
+    this._up('quick_notes',n.id,n);
+  },
+  deleteNote(id) {
+    this._d.quickNotes=(this._d.quickNotes||[]).filter(n=>n.id!==id);
+    this._del('quick_notes',id);
+  },
+
+  saveFinancialTransaction(t) {
+    if(!this._d.financialTransactions) this._d.financialTransactions=[];
+    t.id=t.id||this.uid();
+    const idx=this._d.financialTransactions.findIndex(x=>x.id===t.id);
+    if(idx>=0) this._d.financialTransactions[idx]=t; else this._d.financialTransactions.unshift(t);
+    this._up('financial_transactions',t.id,t);
+  },
+
+  addSessionsToClient(clientId,count) {
+    const c=this.getClient(clientId); if(!c) return;
+    if(typeof c.remainingSessions!=='number') c.remainingSessions=0;
+    c.remainingSessions+=Number(count)||0;
+    this.saveClient(c);
+  },
+
+  savePartnerRequest(r) {
+    if(!this._d.partnerRequests) this._d.partnerRequests=[];
+    r.id=r.id||this.uid();
+    const idx=this._d.partnerRequests.findIndex(x=>x.id===r.id);
+    if(idx>=0) this._d.partnerRequests[idx]=r; else this._d.partnerRequests.unshift(r);
+    this._up('partner_requests',r.id,r);
+  },
+  deletePartnerRequest(id) {
+    this._d.partnerRequests=(this._d.partnerRequests||[]).filter(r=>r.id!==id);
+    this._del('partner_requests',id);
+  },
+
   _calcEndTime(time) {
-    if (!time || !/^\d{2}:\d{2}$/.test(time)) return '00:00';
-    const [h,m] = time.split(':').map(Number);
-    const dt = new Date(); dt.setHours(h); dt.setMinutes(m + 60);
+    if(!time||!/^\d{2}:\d{2}$/.test(time)) return '00:00';
+    const [h,m]=time.split(':').map(Number);
+    const dt=new Date(); dt.setHours(h); dt.setMinutes(m+60);
     return `${String(dt.getHours()).padStart(2,'0')}:${String(dt.getMinutes()).padStart(2,'0')}`;
   },
   _normalizeSchedule(ev) {
-    if (!ev.time && ev.startTime) ev.time = ev.startTime;
-    if (!ev.endTime && ev.time) ev.endTime = this._calcEndTime(ev.time);
+    if(!ev.time&&ev.startTime) ev.time=ev.startTime;
+    if(!ev.endTime&&ev.time) ev.endTime=this._calcEndTime(ev.time);
     return ev;
   },
   saveSchedule(ev) {
-    if (!this._d.schedules) this._d.schedules = [];
-    ev = this._normalizeSchedule(ev);
-    const idx = this._d.schedules.findIndex(x => x.id === ev.id);
-    if (idx >= 0) {
-      const existing = this._d.schedules[idx];
-      const nowDone = ev.status === 'done';
-      const wasDone = existing.status === 'done';
-      if (!wasDone && nowDone && !ev.sessionUsed) {
-        ev.sessionUsed = this._consumeSession(ev.clientId);
-      }
-      this._d.schedules[idx] = ev;
+    if(!this._d.schedules) this._d.schedules=[];
+    ev=this._normalizeSchedule(ev);
+    const idx=this._d.schedules.findIndex(x=>x.id===ev.id);
+    if(idx>=0) {
+      const existing=this._d.schedules[idx];
+      if(!existing.status==='done'&&ev.status==='done'&&!ev.sessionUsed) ev.sessionUsed=this._consumeSession(ev.clientId);
+      this._d.schedules[idx]=ev;
     } else {
-      ev.id = ev.id || this.uid();
-      ev.sessionUsed = ev.sessionUsed ?? this._consumeSession(ev.clientId);
+      ev.id=ev.id||this.uid();
+      ev.sessionUsed=ev.sessionUsed??this._consumeSession(ev.clientId);
       this._d.schedules.unshift(ev);
     }
-    this.save();
+    this._up('schedules',ev.id,ev);
   },
-  deleteSchedule(id) { this._d.schedules = (this._d.schedules||[]).filter(e => e.id !== id); this.save(); },
+  deleteSchedule(id) {
+    this._d.schedules=(this._d.schedules||[]).filter(e=>e.id!==id);
+    this._del('schedules',id);
+  },
   completeSchedule(id) {
-    const ev = this.getSchedule(id);
-    if (!ev || ev.status === 'done') return;
-    ev.status = 'done';
-    if (!ev.sessionUsed) ev.sessionUsed = this._consumeSession(ev.clientId);
+    const ev=this.getSchedule(id); if(!ev||ev.status==='done') return;
+    ev.status='done';
+    if(!ev.sessionUsed) ev.sessionUsed=this._consumeSession(ev.clientId);
     this.saveSchedule(ev);
   },
   _consumeSession(clientId) {
-    const c = this.getClient(clientId);
-    if (!c) return false;
-    if (typeof c.remainingSessions !== 'number') c.remainingSessions = 0;
-    if (c.remainingSessions > 0) {
-      c.remainingSessions = Math.max(0, c.remainingSessions - 1);
-      this.saveClient(c);
-      return true;
-    }
+    const c=this.getClient(clientId); if(!c) return false;
+    if(typeof c.remainingSessions!=='number') c.remainingSessions=0;
+    if(c.remainingSessions>0) { c.remainingSessions=Math.max(0,c.remainingSessions-1); this.saveClient(c); return true; }
     return false;
   },
-  getKnowledge() { return this._d.knowledge || DEFAULT_DATA.knowledge; },
-  uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); },
+  uid() { return Date.now().toString(36)+Math.random().toString(36).slice(2,6); },
 };
 
 const Calc = {
@@ -2195,13 +2266,63 @@ const Export = {
 };
 
 const App = {
-  init() {
-    DB.load();
+  async init() {
+    const loader = document.getElementById('app-loader');
+    const appEl  = document.getElementById('app');
+    loader.classList.remove('hidden');
+
+    const { data:{ session } } = await SUPA.auth.getSession();
+    if (!session) {
+      loader.classList.add('hidden');
+      this._showAuth();
+      return;
+    }
+    await DB.init(session.user);
+    loader.classList.add('hidden');
+    appEl.classList.remove('hidden');
+
     Chart.defaults.font.family = "'Inter', system-ui, sans-serif";
     this._theme(DB.getTheme());
     this._bindTheme();
     document.getElementById('back-btn')?.addEventListener('click',()=>Router.go('clients'));
     Router.init();
+  },
+
+  _showAuth() {
+    const screen = document.getElementById('auth-screen');
+    const form   = document.getElementById('login-form');
+    const errEl  = document.getElementById('auth-error');
+    const btn    = document.getElementById('auth-submit');
+    screen.classList.remove('hidden');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errEl.textContent = '';
+      btn.disabled = true;
+      btn.textContent = 'Входимо...';
+      const { data, error } = await SUPA.auth.signInWithPassword({
+        email:    document.getElementById('auth-email').value.trim(),
+        password: document.getElementById('auth-password').value,
+      });
+      if (error) {
+        errEl.textContent = error.message === 'Invalid login credentials'
+          ? 'Невірний email або пароль' : error.message;
+        btn.disabled = false;
+        btn.textContent = 'Увійти';
+        return;
+      }
+      screen.classList.add('hidden');
+      const loader = document.getElementById('app-loader');
+      loader.classList.remove('hidden');
+      await DB.init(data.user);
+      loader.classList.add('hidden');
+      document.getElementById('app').classList.remove('hidden');
+      Chart.defaults.font.family = "'Inter', system-ui, sans-serif";
+      this._theme(DB.getTheme());
+      this._bindTheme();
+      document.getElementById('back-btn')?.addEventListener('click',()=>Router.go('clients'));
+      Router.init();
+    });
   },
 
   _theme(t) {
