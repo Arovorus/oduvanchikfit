@@ -525,11 +525,21 @@ const DB = {
   // ── Запис — оновлює кеш + пише у Supabase асинхронно ──────────────────────
   _up(table, id, payload) {
     SUPA.from(table).upsert({id, user_id:_uid, payload, updated_at:new Date().toISOString()})
-      .then(({error})=>{ if(error) console.error(table, error); });
+      .then(({error})=>{
+        if(error) {
+          console.error(table, error);
+          Toast.show('Помилка збереження: ' + error.message, 'err');
+        }
+      });
   },
   _del(table, id) {
     SUPA.from(table).delete().eq('id',id).eq('user_id',_uid)
-      .then(({error})=>{ if(error) console.error(table,'del',error); });
+      .then(({error})=>{
+        if(error) {
+          console.error(table, 'del', error);
+          Toast.show('Помилка видалення: ' + error.message, 'err');
+        }
+      });
   },
 
   saveClient(c) {
@@ -613,7 +623,7 @@ const DB = {
     const idx=this._d.schedules.findIndex(x=>x.id===ev.id);
     if(idx>=0) {
       const existing=this._d.schedules[idx];
-      if(!existing.status==='done'&&ev.status==='done'&&!ev.sessionUsed) ev.sessionUsed=this._consumeSession(ev.clientId);
+      if(existing.status!=='done'&&ev.status==='done'&&!ev.sessionUsed) ev.sessionUsed=this._consumeSession(ev.clientId);
       this._d.schedules[idx]=ev;
     } else {
       ev.id=ev.id||this.uid();
@@ -2223,7 +2233,7 @@ Views.Calendar = {
         DB.saveFinancialTransaction({clientId, amount:tariff.price, service:tariff.name, date});
         Toast.show(`Тариф "${tariff.name}" — ${tariff.price} ₴, +${tariff.sessions} зан.`, 'info');
       } else if (typeof client.remainingSessions !== 'number' || client.remainingSessions <= 0) {
-        Toast.show('У клієнта немає оплачених занять — запис створено, але зверніть увагу.','info');
+        throw new Error(`У клієнта "${client.name}" немає оплачених занять. Поповніть баланс або оберіть тариф.`);
       }
       DB.saveSchedule({ clientId, date, time:start, endTime:end, status:'scheduled', notes, });
       Modal.close(); this.render(date); Toast.show('🎉 Запис успішно створено!');
